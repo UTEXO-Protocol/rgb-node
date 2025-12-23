@@ -11,6 +11,9 @@ from src.wallet_utils import BACKUP_PATH, create_wallet_instance, get_backup_pat
 import shutil
 import uuid
 import rgb_lib
+import logging
+
+logger = logging.getLogger(__name__)
 
 env_network = int(os.getenv("NETWORK", "3"))
 NETWORK = BitcoinNetwork(env_network)
@@ -291,6 +294,15 @@ def restore_wallet(
         restore_wallet_instance(xpub_van,xpub_col,master_fingerprint, password, backup_path)
         return {"message": "Wallet restored successfully"}
     except WalletStateExistsError as exc:
+        logger.error(f"Failed to restore wallet (WalletStateExistsError): {str(exc)}", exc_info=True)
         raise HTTPException(status_code=409, detail=str(exc))
+    except rgb_lib.RgbLibError as e:
+        error_type = type(e).__name__
+        error_message = str(e) if str(e) else error_type
+        logger.error(f"Failed to restore wallet [RgbLibError.{error_type}]: {error_message}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Failed to restore wallet: {error_type}")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to restore wallet: {str(e)}")
+        error_type = type(e).__name__
+        error_message = str(e) if str(e) else f"{error_type} (no message)"
+        logger.error(f"Failed to restore wallet [{error_type}]: {error_message}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Failed to restore wallet: {error_message}")
