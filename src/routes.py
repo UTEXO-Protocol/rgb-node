@@ -1,10 +1,42 @@
 from typing import List, Optional
 from fastapi import File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from src.dependencies import get_wallet,create_wallet
+from src.dependencies import get_wallet, create_wallet
 from rgb_lib import BitcoinNetwork, Wallet,AssetSchema, Assignment
-from src.rgb_model import AssetNia, Backup, Balance, BtcBalance, DecodeRgbInvoiceRequestModel, DecodeRgbInvoiceResponseModel, FailTransferRequestModel, GetAssetResponseModel, GetFeeEstimateRequestModel, IssueAssetNiaRequestModel, ListTransfersRequestModel, ReceiveData, Recipient, RefreshRequestModel, RegisterModel, RgbInvoiceRequestModel, SendAssetBeginModel, SendAssetBeginRequestModel, SendBtcBeginRequestModel, SendBtcEndRequestModel, SendResult, Transfer, Unspent
+from src.rgb_model import (
+    AssetBalanceRequest,
+    AssetNia,
+    Backup,
+    Balance,
+    BtcBalance,
+    CreateUtxosBegin,
+    CreateUtxosEnd,
+    CreateUtxosWithSign,
+    DecodeRgbInvoiceRequestModel,
+    DecodeRgbInvoiceResponseModel,
+    FailTransferRequestModel,
+    GetAssetResponseModel,
+    GetFeeEstimateRequestModel,
+    IssueAssetNiaRequestModel,
+    ListTransfersRequestModel,
+    ReceiveData,
+    Recipient,
+    RefreshRequestModel,
+    RegisterModel,
+    RgbInvoiceRequestModel,
+    SendAssetBeginModel,
+    SendAssetBeginRequestModel,
+    SendAssetEndRequestModel,
+    SendBatchBeginRequestModel,
+    SendBatchWithSignRequestModel,
+    SendBtcBeginRequestModel,
+    SendBtcEndRequestModel,
+    SendResult,
+    SignPSBT,
+    Transfer,
+    Unspent,
+    WatchOnly,
+)
 from fastapi import APIRouter, Depends, Header
 import os
 from src.wallet_utils import BACKUP_PATH, create_wallet_instance, get_backup_path, offline_wallet_instance, remove_backup_if_exists, restore_wallet_instance, test_wallet_instance, WalletStateExistsError
@@ -20,48 +52,6 @@ invoices = {}
 PROXY_URL = os.getenv('PROXY_ENDPOINT')
 vanilla_keychain = 1
 
-class WatchOnly(BaseModel):
-    xpub: str
-
-class CreateUtxosBegin(BaseModel):
-    mnemonic: str = None
-    up_to: bool = False
-    num: int = 5
-    size: int = 1000
-    fee_rate: int = 5
-
-
-class CreateUtxosWithSign(BaseModel):
-    """Create UTXOs in one call: begin (load_wallet) → sign (offline_wallet + mnemonic) → end."""
-    mnemonic: str
-    up_to: bool = False
-    num: int = 5
-    size: int = 1000
-    fee_rate: int = 5
-
-
-class SendAssetEndRequestModel(BaseModel):
-    signed_psbt: str
-
-
-class SendBatchBeginRequestModel(BaseModel):
-    """Params for send batch begin – passed directly to wallet.send_begin."""
-    recipient_map: dict[str, List[Recipient]]
-    donation: bool = False
-    fee_rate: int = 5
-    min_confirmations: int = 1
-
-
-class SendBatchWithSignRequestModel(SendBatchBeginRequestModel):
-    """Send batch in one call: begin → sign → end (like createutxos)."""
-    mnemonic: str
-
-
-class CreateUtxosEnd(BaseModel):
-    signed_psbt: str
-
-class AssetBalanceRequest(BaseModel):
-    asset_id: str
 
 @router.post("/wallet/generate_keys")
 def register_wallet():
@@ -211,15 +201,6 @@ def send_begin(req: SendAssetBeginRequestModel, wallet_dep: tuple[Wallet, object
     
     psbt = wallet.send_begin(online, send_model.recipient_map, send_model.donation, send_model.fee_rate, send_model.min_confirmations)
     return psbt
-
-class SignPSBT(BaseModel):
-    mnemonic: str
-    psbt: str
-    xpub_van: str
-    xpub_col: str
-    master_fingerprint: str
-
-
 
 @router.post("/wallet/sign")
 def sign_psbt(req: SignPSBT):
