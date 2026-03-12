@@ -79,6 +79,7 @@ class SendAssetBeginRequestModel(BaseModel):
     recipient_id: str= None
     amount: int= None
     witness_data: Optional[WitnessData] = None
+    donation: bool = False
     fee_rate: Optional[int] = None
     min_confirmations: Optional[int] = None
 
