@@ -339,9 +339,10 @@ def generate_invoice(
 ):
     wallet, online,xpub_van, xpub_col = wallet_dep
     assignment = Assignment.FUNGIBLE(req.amount)
-    duration_seconds=1500
     min_conf = 1 if env_network != 0 else 3
-    receive = wallet.blind_receive(req.asset_id, assignment, duration_seconds, [PROXY_URL], min_conf)
+    receive = wallet.blind_receive(
+        req.asset_id, assignment, req.duration_seconds, [PROXY_URL], min_conf
+    )
     
     try:
         job_id = enqueue_refresh_job(
@@ -368,9 +369,10 @@ def generate_invoice(
 ):
     wallet, online,xpub_van, xpub_col = wallet_dep
     assignment = Assignment.FUNGIBLE(req.amount)
-    duration_seconds=1500
     min_conf = 1 if env_network != 0 else 3
-    receive = wallet.blind_receive(req.asset_id, assignment, duration_seconds, [PROXY_URL], min_conf)
+    receive = wallet.blind_receive(
+        req.asset_id, assignment, req.duration_seconds, [PROXY_URL], min_conf
+    )
     
     try:
         job_id = enqueue_refresh_job(
@@ -396,9 +398,10 @@ def generate_invoice(
 ):
     wallet, online,xpub_van, xpub_col = wallet_dep
     assignment = Assignment.FUNGIBLE(req.amount)
-    duration_seconds=1500
     min_conf = 1 if env_network != 0 else 3
-    receive = wallet.witness_receive(req.asset_id, assignment, duration_seconds, [PROXY_URL], min_conf)
+    receive = wallet.witness_receive(
+        req.asset_id, assignment, req.duration_seconds, [PROXY_URL], min_conf
+    )
     
     # Enqueue refresh watcher job for invoice
     try:
