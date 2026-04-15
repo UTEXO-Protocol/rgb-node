@@ -170,7 +170,9 @@ Base URL examples:
 
 - `POST /wallet/generate_keys` → generate network‑specific keys (xpubs/mnemonic material as applicable)
 - `POST /wallet/register` → derive address and return on‑chain BTC balance snapshot; optional JSON body controls address reuse (see below)
-- `POST /wallet/address` → returns BTC address
+- `POST /wallet/address` → returns BTC deposit address string
+- `POST /wallet/rotatevanillaaddress` → rotate vanilla (BTC) receive slot; returns new address string
+- `POST /wallet/rotatecoloredaddress` → rotate colored (RGB) receive slot; returns new address string
 
 Include headers for wallet selection:
 ```bash
@@ -199,6 +201,14 @@ rgb-lib can **reuse derivation slots** for receive flows when `reuse_addresses` 
 1. **Per registration** — `POST /wallet/register` with JSON `{"reuse_addresses": true}` (see example above).
 2. **Deploy default** — set `REUSE_ADDRESSES=1` (or `true` / `yes` / `on`) so new wallets get reuse unless the register body overrides it.
 3. **Persisted** — once set, the value is stored under the wallet’s data directory (`wallet.json`); later registrations can omit the body to keep the saved preference.
+
+**`/wallet/address` vs rotation**
+
+- **`POST /wallet/address`** — returns the wallet’s current deposit address string (same headers as other wallet routes). With reuse on, two calls in a row typically return the **identical** string.
+- **`POST /wallet/rotatevanillaaddress`** — advances the **vanilla (BTC)** receive derivation; response body is the **new** vanilla address string.
+- **`POST /wallet/rotatecoloredaddress`** — advances the **colored (RGB)** receive derivation; response body is the **new** colored address string.
+
+Use rotation when you want a **new** receive slot after reuse (e.g. privacy or a new invoice period). After you rotate, `POST /wallet/address` reflects the new deposit address; with reuse still enabled, consecutive `/wallet/address` calls should again be **identical** until the next rotation.
 
 
 ### UTXO management
