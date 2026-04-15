@@ -8,6 +8,7 @@ from src.rgb_model import (
     AssetIfa,
     AssetNia,
     Backup,
+    BackupCreatedResponse,
     Balance,
     BtcBalance,
     CreateUtxosBegin,
@@ -26,9 +27,14 @@ from src.rgb_model import (
     OperationResult,
     ReceiveData,
     Recipient,
+    RefreshJobStatusResponse,
     RefreshRequestModel,
+    RefreshWalletResponse,
+    RefreshWatcherStatusResponse,
     RegisterModel,
+    GenerateKeysResponse,
     RgbInvoiceRequestModel,
+    RgbWalletTransaction,
     SendAssetBeginModel,
     SendAssetBeginRequestModel,
     SendAssetEndRequestModel,
@@ -38,8 +44,12 @@ from src.rgb_model import (
     SendBtcEndRequestModel,
     SendResult,
     SignPSBT,
+    SyncJobEnqueuedResponse,
     Transfer,
     Unspent,
+    WalletFailTransfersResponse,
+    WalletRestoreResponse,
+    WalletSyncResponse,
     WatchOnly,
 )
 from fastapi import APIRouter, Depends, Header
@@ -50,9 +60,16 @@ from src.wallet_utils import (
     get_backup_path,
     offline_wallet_instance,
     remove_backup_if_exists,
+    resolved_reuse_addresses,
     restore_wallet_instance,
-    test_wallet_instance,
     WalletStateExistsError,
+)
+from src.route_helpers import (
+    inflate_end_to_response,
+    invoice_expiration_timestamp,
+    normalize_recipient_map,
+    send_begin_psbt,
+    send_end_to_response,
 )
 from src.refresh_queue import enqueue_refresh_job, get_job_status, get_watcher_status
 import shutil
@@ -68,38 +85,46 @@ NETWORK = BitcoinNetwork(env_network)
 router = APIRouter()
 invoices = {}
 PROXY_URL = os.getenv('PROXY_ENDPOINT')
-vanilla_keychain = 1
 
 
-@router.post("/wallet/generate_keys")
-def register_wallet():
-    send_keys = rgb_lib.generate_keys(NETWORK)
-    return send_keys
+@router.post("/wallet/generate_keys", response_model=GenerateKeysResponse)
+def generate_keys():
+    keys = rgb_lib.generate_keys(NETWORK)
+    return GenerateKeysResponse(
+        mnemonic=keys.mnemonic,
+        xpub=keys.xpub,
+        master_fingerprint=keys.master_fingerprint,
+        account_xpub_vanilla=keys.account_xpub_vanilla,
+        account_xpub_colored=keys.account_xpub_colored,
+    )
 
 @router.post("/wallet/register", response_model=RegisterModel)
 def register_wallet(wallet_dep: tuple[Wallet, object,str,str]=Depends(create_wallet)):
     wallet, online ,xpub_van, xpub_col= wallet_dep
     btc_balance = wallet.get_btc_balance(online, False)
     address = wallet.get_address()
-    return { "address": address, "btc_balance": btc_balance }
-@router.post("/wallet/get_fee_estimation")
+    return {
+        "address": address,
+        "btc_balance": btc_balance,
+        "reuse_addresses": resolved_reuse_addresses(xpub_van),
+    }
+@router.post("/wallet/get_fee_estimation", response_model=int)
 def get_fee_estimation(req:GetFeeEstimateRequestModel, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
     # fee_estimation = wallet.get_fee_estimation(online,req.blocks)
     # return fee_estimation
     return 5
-@router.post("/wallet/sendbtcbegin")
+@router.post("/wallet/sendbtcbegin", response_model=str)
 def send_btc_begin(req: SendBtcBeginRequestModel, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
     psbt = wallet.send_btc_begin(online, req.address, req.amount, req.fee_rate, req.skip_sync)
     return psbt
-@router.post("/wallet/sendbtcend")
+@router.post("/wallet/sendbtcend", response_model=str)
 def send_btc_end(req: SendBtcEndRequestModel, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
     result = wallet.send_btc_end(online, req.signed_psbt, req.skip_sync)
     return result
-# response_model=List[Unspent]
-@router.post("/wallet/listunspents")
+@router.post("/wallet/listunspents", response_model=List[Unspent])
 def list_unspents(wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
     unspents = wallet.list_unspents(online, False, False)
@@ -153,6 +178,19 @@ def get_address(wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     address = wallet.get_address()
     return address
 
+
+@router.post("/wallet/rotatevanillaaddress", response_model=str)
+def rotate_vanilla_address(wallet_dep: tuple[Wallet, object, str, str] = Depends(get_wallet)):
+    wallet, _online, _xpub_van, _xpub_col = wallet_dep
+    return wallet.rotate_vanilla_address()
+
+
+@router.post("/wallet/rotatecoloredaddress", response_model=str)
+def rotate_colored_address(wallet_dep: tuple[Wallet, object, str, str] = Depends(get_wallet)):
+    wallet, _online, _xpub_van, _xpub_col = wallet_dep
+    return wallet.rotate_colored_address()
+
+
 @router.post("/wallet/issueassetnia",response_model=AssetNia)
 def issue_asset_nia(req: IssueAssetNiaRequestModel, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
@@ -168,14 +206,21 @@ def issue_asset_cfa(req: IssueAssetIfaRequestModel, wallet_dep: tuple[Wallet, ob
 @router.post('/wallet/inflatebegin',response_model=str)
 def inflate_begin(req: InflateAssetIfaRequestModel, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
-    psbt = wallet.inflate_begin(online,req.asset_id, req.inflation_amounts,req.fee_rate,req.min_confirmations)
-    return psbt
+    r = wallet.inflate_begin(
+        online,
+        req.asset_id,
+        req.inflation_amounts,
+        req.fee_rate,
+        req.min_confirmations,
+        req.dry_run,
+    )
+    return r.psbt
 
 @router.post('/wallet/inflateend',response_model=OperationResult)
 def inflate_end(req: InflateEndRequestModel, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
     result = wallet.inflate_end(online,req.signed_psbt)
-    return result
+    return inflate_end_to_response(result)
 
 @router.post("/wallet/assetbalance",response_model=Balance)
 def get_asset_balance(req: AssetBalanceRequest, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
@@ -183,14 +228,14 @@ def get_asset_balance(req: AssetBalanceRequest, wallet_dep: tuple[Wallet, object
     balance = wallet.get_asset_balance(req.asset_id)
     return balance
 
-@router.post("/wallet/decodergbinvoice")
+@router.post("/wallet/decodergbinvoice", response_model=DecodeRgbInvoiceResponseModel)
 def decode_rgb_invoice(req:DecodeRgbInvoiceRequestModel, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet) ):
     wallet, online,xpub_van, xpub_col = wallet_dep
     invoice_data = rgb_lib.Invoice(req.invoice).invoice_data()
     return invoice_data
 
 
-@router.post("/wallet/sendbegin")
+@router.post("/wallet/sendbegin", response_model=str)
 def send_begin(req: SendAssetBeginRequestModel, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
     if req.invoice is None:
@@ -237,26 +282,26 @@ def send_begin(req: SendAssetBeginRequestModel, wallet_dep: tuple[Wallet, object
     )
     print("invoice data", recipient_map, send_model)
     
-    psbt = wallet.send_begin(online, send_model.recipient_map, send_model.donation, send_model.fee_rate, send_model.min_confirmations)
+    psbt = send_begin_psbt(
+        wallet,
+        online,
+        send_model.recipient_map,
+        send_model.donation,
+        send_model.fee_rate,
+        send_model.min_confirmations,
+        req.expiration_timestamp,
+        req.dry_run,
+    )
     return psbt
 
-@router.post("/wallet/sign")
+@router.post("/wallet/sign", response_model=str)
 def sign_psbt(req: SignPSBT):
-    wallet, online = test_wallet_instance(req.xpub_van, req.xpub_col, req.mnemonic, req.master_fingerprint)
-    signed_psbt = wallet.sign_psbt(req.psbt)
-    print("signed_psbt", signed_psbt)
-    return signed_psbt
-
-
-@router.post("/wallet/offlinesign")
-def offlinesign_psbt(req: SignPSBT):
-    wallet = offline_wallet_instance(req.xpub_van, req.xpub_col, req.mnemonic, req.master_fingerprint)
-    signed_psbt = wallet.sign_psbt(req.psbt)
-    return signed_psbt
+    signer = offline_wallet_instance(req.xpub_van, req.xpub_col, req.mnemonic, req.master_fingerprint)
+    return signer.sign_psbt(req.psbt)
 
 
 @router.post("/wallet/sendend", response_model=SendResult)
-def send_begin(
+def send_end(
     req: SendAssetEndRequestModel, 
     wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet),
     master_fingerprint: str = Header(..., alias="master-fingerprint")
@@ -275,35 +320,24 @@ def send_begin(
     except Exception as e:
         logger.error(f"Failed to enqueue refresh job: {e}", exc_info=True)
     
-    return result
-
-
-def _normalize_recipient_map(recipient_map: dict[str, List[Recipient]]) -> dict:
-    """Convert int assignments to Assignment.FUNGIBLE for wallet.send_begin."""
-    out = {}
-    for asset_id, recs in recipient_map.items():
-        out[asset_id] = []
-        for r in recs:
-            asn = r.assignment
-            if isinstance(asn, int):
-                asn = Assignment.FUNGIBLE(asn)
-            out[asset_id].append(
-                Recipient(
-                    recipient_id=r.recipient_id,
-                    assignment=asn,
-                    witness_data=r.witness_data,
-                    transport_endpoints=r.transport_endpoints,
-                )
-            )
-    return out
+    return send_end_to_response(result)
 
 
 @router.post("/wallet/sendbatchbegin", response_model=str)
 def send_batch_begin(req: SendBatchBeginRequestModel, wallet_dep: tuple[Wallet, object, str, str] = Depends(get_wallet)):
     """Build PSBT for batch send; params passed directly to wallet.send_begin."""
     wallet, online, xpub_van, xpub_col = wallet_dep
-    recipient_map = _normalize_recipient_map(req.recipient_map)
-    psbt = wallet.send_begin(online, recipient_map, req.donation, req.fee_rate, req.min_confirmations)
+    recipient_map = normalize_recipient_map(req.recipient_map)
+    psbt = send_begin_psbt(
+        wallet,
+        online,
+        recipient_map,
+        req.donation,
+        req.fee_rate,
+        req.min_confirmations,
+        req.expiration_timestamp,
+        req.dry_run,
+    )
     return psbt
 
 
@@ -312,7 +346,7 @@ def send_batch_end(req: SendAssetEndRequestModel, wallet_dep: tuple[Wallet, obje
     """Finalize batch send with signed PSBT (like createutxosend)."""
     wallet, online, xpub_van, xpub_col = wallet_dep
     result = wallet.send_end(online, req.signed_psbt, False)
-    return result
+    return send_end_to_response(result)
 
 
 @router.post("/wallet/sendbatch", response_model=SendResult)
@@ -323,12 +357,21 @@ def send_batch_with_sign(
 ):
     """Send batch in one call: begin → sign → end (like createutxos)."""
     wallet, online, xpub_van, xpub_col = wallet_dep
-    recipient_map = _normalize_recipient_map(req.recipient_map)
-    psbt = wallet.send_begin(online, recipient_map, req.donation, req.fee_rate, req.min_confirmations)
+    recipient_map = normalize_recipient_map(req.recipient_map)
+    psbt = send_begin_psbt(
+        wallet,
+        online,
+        recipient_map,
+        req.donation,
+        req.fee_rate,
+        req.min_confirmations,
+        req.expiration_timestamp,
+        req.dry_run,
+    )
     signer = offline_wallet_instance(xpub_van, xpub_col, req.mnemonic, master_fingerprint)
     signed_psbt = signer.sign_psbt(psbt)
     result = wallet.send_end(online, signed_psbt, False)
-    return result
+    return send_end_to_response(result)
 
 
 @router.post("/wallet/blindreceive", response_model=ReceiveData)
@@ -341,7 +384,11 @@ def generate_invoice(
     assignment = Assignment.FUNGIBLE(req.amount)
     min_conf = 1 if env_network != 0 else 3
     receive = wallet.blind_receive(
-        req.asset_id, assignment, req.duration_seconds, [PROXY_URL], min_conf
+        req.asset_id,
+        assignment,
+        invoice_expiration_timestamp(req.duration_seconds),
+        [PROXY_URL],
+        min_conf,
     )
     
     try:
@@ -371,7 +418,11 @@ def generate_invoice(
     assignment = Assignment.FUNGIBLE(req.amount)
     min_conf = 1 if env_network != 0 else 3
     receive = wallet.blind_receive(
-        req.asset_id, assignment, req.duration_seconds, [PROXY_URL], min_conf
+        req.asset_id,
+        assignment,
+        invoice_expiration_timestamp(req.duration_seconds),
+        [PROXY_URL],
+        min_conf,
     )
     
     try:
@@ -400,7 +451,11 @@ def generate_invoice(
     assignment = Assignment.FUNGIBLE(req.amount)
     min_conf = 1 if env_network != 0 else 3
     receive = wallet.witness_receive(
-        req.asset_id, assignment, req.duration_seconds, [PROXY_URL], min_conf
+        req.asset_id,
+        assignment,
+        invoice_expiration_timestamp(req.duration_seconds),
+        [PROXY_URL],
+        min_conf,
     )
     
     # Enqueue refresh watcher job for invoice
@@ -420,32 +475,33 @@ def generate_invoice(
     
     return receive
 
-@router.post("/wallet/failtransfers")
+@router.post("/wallet/failtransfers", response_model=WalletFailTransfersResponse)
 def failtransfers(req: FailTransferRequestModel, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
     failed = wallet.fail_transfers(online, req.batch_transfer_idx, req.no_asset_only, req.skip_sync)
     return {'failed': failed}
 
-@router.post("/wallet/listtransactions")
+@router.post("/wallet/listtransactions", response_model=List[RgbWalletTransaction])
 def list_transaction(wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online ,xpub_van, xpub_col= wallet_dep
     list_transactions = wallet.list_transactions(online, False)
     return list_transactions
 
-@router.post("/wallet/listtransfers")
+@router.post("/wallet/listtransfers", response_model=List[Transfer])
 def list_transfers(req:ListTransfersRequestModel, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
     
     list_transfers = wallet.list_transfers(req.asset_id)
     return list_transfers
 
-@router.post("/wallet/refresh")
+@router.post("/wallet/refresh", response_model=RefreshWalletResponse)
 def refresh_wallet(wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
-    refreshed_transfers = wallet.refresh(online,None, [], False)
-    return refreshed_transfers
+    refreshed_transfers = wallet.refresh(online, None, [], False)
+    # JSON keys must be strings; rgb-lib uses int indices.
+    return {str(k): v for k, v in refreshed_transfers.items()}
 
-@router.post("/wallet/sync")
+@router.post("/wallet/sync", response_model=WalletSyncResponse)
 def wallet_sync(
     wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)
 ):
@@ -454,7 +510,7 @@ def wallet_sync(
     return {"message": "Wallet synced successfully"}
 
 
-@router.post("/wallet/sync-job")
+@router.post("/wallet/sync-job", response_model=SyncJobEnqueuedResponse)
 def trigger_sync_job(
     wallet_dep: tuple[Wallet, object, str, str] = Depends(get_wallet),
     master_fingerprint: str = Header(..., alias="master-fingerprint")
@@ -487,7 +543,7 @@ def trigger_sync_job(
         logger.error(f"Failed to enqueue sync job: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to enqueue sync job: {str(e)}")
 
-@router.post("/wallet/backup")
+@router.post("/wallet/backup", response_model=BackupCreatedResponse)
 def create_backup(req:Backup, wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online, xpub_van, xpub_col = wallet_dep
     remove_backup_if_exists(xpub_van)
@@ -501,7 +557,18 @@ def create_backup(req:Backup, wallet_dep: tuple[Wallet, object,str,str]=Depends(
         "message": "Backup created successfully",
         "download_url": f"/wallet/backup/{xpub_van}"
     }
-@router.get("/wallet/backup/{backup_id}")
+@router.get(
+    "/wallet/backup/{backup_id}",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "description": "Wallet backup file stream",
+            "content": {
+                "application/octet-stream": {"schema": {"type": "string", "format": "binary"}},
+            },
+        }
+    },
+)
 def get_backup(backup_id):
     backup_path = get_backup_path(backup_id)
     if not os.path.isfile(backup_path):
@@ -512,13 +579,17 @@ def get_backup(backup_id):
         media_type="application/octet-stream",
         filename=f"{backup_id}.backup"
     )
-@router.post("/wallet/restore")
+@router.post("/wallet/restore", response_model=WalletRestoreResponse)
 def restore_wallet(
     file: UploadFile = File(...),
     password: str = Form(...),
     xpub_van: str = Form(...),
     xpub_col: str = Form(...),
-    master_fingerprint: str = Form(...)
+    master_fingerprint: str = Form(...),
+    reuse_addresses: Optional[bool] = Form(
+        None,
+        description="Optional; maps to rgb-lib WalletData.reuse_addresses (persisted in wallet.json).",
+    ),
 ):
     remove_backup_if_exists(xpub_van)
     backup_path = get_backup_path(xpub_van)
@@ -526,14 +597,21 @@ def restore_wallet(
     with open(backup_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     try:
-        restore_wallet_instance(xpub_van,xpub_col,master_fingerprint, password, backup_path)
+        restore_wallet_instance(
+            xpub_van,
+            xpub_col,
+            master_fingerprint,
+            password,
+            backup_path,
+            reuse_addresses=reuse_addresses,
+        )
         return {"message": "Wallet restored successfully"}
     except WalletStateExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to restore wallet: {str(e)}")
 
-@router.get("/wallet/refresh/status/{job_id}")
+@router.get("/wallet/refresh/status/{job_id}", response_model=RefreshJobStatusResponse)
 def get_refresh_job_status(job_id: str):
     """Get status of a refresh job."""
     status = get_job_status(job_id)
@@ -541,7 +619,7 @@ def get_refresh_job_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     return status
 
-@router.get("/wallet/refresh/watcher/{xpub_van}/{recipient_id}")
+@router.get("/wallet/refresh/watcher/{xpub_van}/{recipient_id}", response_model=RefreshWatcherStatusResponse)
 def get_refresh_watcher_status(xpub_van: str, recipient_id: str):
     """Get status of a refresh watcher for a specific recipient."""
     status = get_watcher_status(xpub_van, recipient_id)

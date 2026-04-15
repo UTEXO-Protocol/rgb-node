@@ -98,7 +98,7 @@ curl -X POST :8000/wallet/listassets \
 
 ## Tech Stack
 
-- Python 3.12
+- Python 3.11+ (Docker image uses 3.11 for the bundled `rgb-lib` wheel compatibility)
 - FastAPI
 - `rgb-lib` Python bindings (PSBT + RGB protocol integration)
 
@@ -112,7 +112,7 @@ Self‑host
 
 
 ### Prerequisites
-- Python 3.12+
+- Python 3.11+ (match `requirements.txt` / Docker if using the bundled `rgb-lib` wheel)
 - Or Docker/Docker Compose
 
 ### Environment
@@ -129,6 +129,7 @@ export PROXY_ENDPOINT=http://127.0.0.1:9090
 The service reads:
 - `NETWORK` → selects `rgb_lib.BitcoinNetwork`
 - `PROXY_ENDPOINT` → used as transport endpoint for invoices
+- `REUSE_ADDRESSES` → optional default for rgb-lib `WalletData.reuse_addresses` when registration does not set it (see [Reuse addresses](#reuse-addresses))
 
 ### Install and run (self‑host, local)
 
@@ -168,7 +169,7 @@ Base URL examples:
 ### Wallet bootstrap
 
 - `POST /wallet/generate_keys` → generate network‑specific keys (xpubs/mnemonic material as applicable)
-- `POST /wallet/register` → derive address and return on‑chain BTC balance snapshot
+- `POST /wallet/register` → derive address and return on‑chain BTC balance snapshot; optional JSON body controls address reuse (see below)
 - `POST /wallet/address` → returns BTC address
 
 Include headers for wallet selection:
@@ -176,8 +177,36 @@ Include headers for wallet selection:
 curl -X POST :8000/wallet/register \
   -H 'xpub-van: xpub6...van' \
   -H 'xpub-col: xpub6...col' \
-  -H 'master-fingerprint: ffffffff'
+  -H 'master-fingerprint: ffffffff' \
+  -H 'Content-Type: application/json' \
+  -d '{"reuse_addresses": true}'
 ```
+
+Register body (all fields optional):
+
+| Field | Meaning |
+|-------|--------|
+| `reuse_addresses` | If `true` or `false`, saved to per-wallet config and passed to rgb-lib `WalletData.reuse_addresses`. If omitted, the server uses existing `wallet.json` or the `REUSE_ADDRESSES` env default. |
+
+Response includes `reuse_addresses` — the effective value after resolution.
+
+### Reuse addresses
+
+rgb-lib can **reuse derivation slots** for receive flows when `reuse_addresses` is enabled. That affects whether consecutive calls to `POST /wallet/address` return the **same** deposit string (until you rotate), which matters for testing and for UX patterns that expect stable addresses.
+
+**How to enable (pick one):**
+
+1. **Per registration** — `POST /wallet/register` with JSON `{"reuse_addresses": true}` (see example above).
+2. **Deploy default** — set `REUSE_ADDRESSES=1` (or `true` / `yes` / `on`) so new wallets get reuse unless the register body overrides it.
+3. **Persisted** — once set, the value is stored under the wallet’s data directory (`wallet.json`); later registrations can omit the body to keep the saved preference.
+
+**Quick check** — with the API running locally:
+
+```bash
+python scripts/run_rgb_node_flows.py reuse_address
+```
+
+This flow registers with `reuse_addresses: true`, syncs/refreshes, calls `/wallet/address` twice (they should match), rotates vanilla and colored addresses, then calls `/wallet/address` twice again (still matching when reuse stays on). Use `--verbose` for per-request JSON on stderr.
 
 
 ### UTXO management
@@ -198,7 +227,7 @@ curl -X POST :8000/wallet/listunspents \
 ### Assets and balances
 
 - `POST /wallet/listassets` → list RGB assets 
-- `POST /wallet/assetbalance` → get balance for `assetId`
+- `POST /wallet/assetbalance` → get balance for `asset_id` (JSON body)
 - `POST /wallet/btcbalance` → get BTC balance (vanilla + colored)
 
 
@@ -206,13 +235,21 @@ curl -X POST :8000/wallet/listunspents \
 
 - `POST /wallet/blindreceive` → create blinded invoice
 - `POST /wallet/witnessreceive` → create witness invoice (wvout)
-- `POST /wallet/decodergbinvoice` → decode invoice
+- `POST /wallet/decodergbinvoice` → decode invoice (`InvoiceData`: assignment, network, transport endpoints, etc.)
 
-Request model for receive:
+Request model for blind/witness receive (`RgbInvoiceRequestModel`):
+
+- `amount` — fungible amount (required when creating a fungible invoice)
+- `asset_id` — optional; omit when the wallet does not know the asset yet (e.g. first receive of an asset from another party). If set, the asset must exist in that wallet’s catalog or rgb-lib may return an error.
+- `duration_seconds`, `min_confirmations` — optional; see OpenAPI `/docs`
+
+Example:
 ```json
 {
-  "asset_id": "<rgb20 asset id>",
-  "amount": 12345
+  "asset_id": "<rgb20 asset id or null>",
+  "amount": 12345,
+  "duration_seconds": 86400,
+  "min_confirmations": 1
 }
 ```
 
@@ -245,8 +282,10 @@ Request model:
 Rules:
 - `recipient_id` is derived from the invoice; if it contains `wvout:` it’s a witness send
 - For witness sends, `witness_data` is required and must include positive `amount_sat` (and optional `blinding`)
-- For non‑witness sends, `witness_data` is ignored (treated as `null`)
-- Optional `fee_rate` and `min_confirmations` default to 5 and 3 when not provided
+- For blind / non‑witness sends, omit `witness_data` (do not send the field, or it is treated as absent)
+- Optional `fee_rate` and `min_confirmations` depend on network (e.g. signet vs mainnet defaults in `routes.py`)
+
+**Signing PSBTs** — use `POST /wallet/sign` with a JSON body containing the mnemonic and account xpubs (`xpub_van`, `xpub_col`, `master_fingerprint`) plus `psbt`. This endpoint does not use the wallet headers above; it uses an offline signer path. Then finalize with `POST /wallet/sendend` using the usual wallet headers.
 
 Response:
 ```json
@@ -272,11 +311,13 @@ Response:
 
 ### History and maintenance
 
-- `POST /wallet/listtransactions` → list on‑chain transactions
-- `POST /wallet/listtransfers` → list RGB transfers for an asset
-- `POST /wallet/refresh` → refresh wallet state
+- `POST /wallet/listtransactions` → list on‑chain / RGB‑related transactions (typed schema in OpenAPI)
+- `POST /wallet/listtransfers` → list RGB transfers (optional JSON `{"asset_id": "..."}`; omit `asset_id` to list all supported by rgb-lib)
+- `POST /wallet/refresh` → refresh wallet state (returns a map of refresh results per transfer index)
 - `POST /wallet/sync` → sync wallet with network
+- `GET /wallet/refresh/status/{job_id}` / `GET /wallet/refresh/watcher/...` — refresh queue status (when PostgreSQL worker is enabled)
 
+Interactive API docs: **`/docs`** (Swagger UI) and **`/openapi.json`** — schemas reflect the current FastAPI `response_model` definitions; restart the process after code changes to refresh them.
 
 ### Backup and restore
 
@@ -390,4 +431,4 @@ The worker automatically:
 - Recovers active watchers on startup (if `ENABLE_RECOVERY=true`)
 
 
-For more details, see [REFRESH_WORKER.md](./REFRESH_WORKER.md).
+For more details, see [REFRESH_FLOW.md](./REFRESH_FLOW.md).
