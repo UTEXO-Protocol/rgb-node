@@ -6,14 +6,22 @@ from datetime import datetime
 import enum
 from typing import Any, List, Literal, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 from pydantic import model_validator
 
 from src.constant import FEE_RATE_FOR_CREATE_UTXOS
 from src.constant import NO_OF_UTXO
 from src.constant import RGB_INVOICE_DURATION_SECONDS
 from src.constant import UTXO_SIZE_SAT
-from rgb_lib import Wallet, TransferStatus,TransportType, TransferKind
+from rgb_lib import (
+    AssetSchema,
+    BitcoinNetwork,
+    Wallet,
+    TransferStatus,
+    TransportType,
+    TransferKind,
+    TransactionType,
+)
 # -------------------- Helper models -----------------------
 
 class CommonException(Exception):
@@ -58,9 +66,35 @@ class SendBtcEndRequestModel(BaseModel):
 class GetFeeEstimateRequestModel(BaseModel):
     blocks: int
 
+
+class RegisterWalletRequest(BaseModel):
+    """Optional JSON body for POST /wallet/register."""
+
+    reuse_addresses: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If true or false, saved to wallet.json and used for rgb-lib WalletData.reuse_addresses. "
+            "If omitted or null, use existing wallet.json or REUSE_ADDRESSES env (default false when unset)."
+        ),
+    )
+
+
 class RegisterModel(BaseModel):
     address: str
     btc_balance: BtcBalance
+    # Effective rgb-lib WalletData.reuse_addresses (body / wallet.json / REUSE_ADDRESSES env).
+    reuse_addresses: bool
+
+
+class GenerateKeysResponse(BaseModel):
+    """Serialized output of rgb_lib.generate_keys (uniffi Keys is not JSON-serializable as-is)."""
+
+    mnemonic: str
+    xpub: str
+    master_fingerprint: str
+    account_xpub_vanilla: str
+    account_xpub_colored: str
+
 
 class WitnessData(BaseModel):
     amount_sat: int
@@ -82,6 +116,9 @@ class SendAssetBeginRequestModel(BaseModel):
     fee_rate: Optional[int] = None
     min_confirmations: Optional[int] = None
     donation: bool = False
+    # Absolute unix expiry for the transfer batch; None = no expiry (rgb-lib send_begin).
+    expiration_timestamp: Optional[int] = None
+    dry_run: bool = False
 
 class SendAssetBeginModel(BaseModel):
     recipient_map: dict[str, List[Recipient]]
@@ -92,6 +129,7 @@ class SendAssetBeginModel(BaseModel):
 class OperationResult(BaseModel):
     txid: str
     batch_transfer_idx: int
+    entropy: int
 
 class SendAssetEndRequestModel(BaseModel):
     signed_psbt: str
@@ -103,6 +141,8 @@ class SendBatchBeginRequestModel(BaseModel):
     donation: bool = False
     fee_rate: int = 5
     min_confirmations: int = 1
+    expiration_timestamp: Optional[int] = None
+    dry_run: bool = False
 
 
 class SendBatchWithSignRequestModel(SendBatchBeginRequestModel):
@@ -208,6 +248,7 @@ class ReceiveData(BaseModel):
 class SendResult(BaseModel):
     txid: str
     batch_transfer_idx: int
+    entropy: int
 
 class BtcBalance(BaseModel):
     vanilla: Balance
@@ -253,6 +294,7 @@ class InflateAssetIfaRequestModel(BaseModel):
     inflation_amounts: list[int]
     fee_rate: int = 5
     min_confirmations: int = 1
+    dry_run: bool = False
 class InflateEndRequestModel(BaseModel):
     signed_psbt: str
 
@@ -386,15 +428,18 @@ class CreateUtxosResponseModel(StatusModel):
 
 
 class DecodeRgbInvoiceResponseModel(BaseModel):
-    """Response model for decoding RGB invoices."""
+    """Decoded invoice (`rgb_lib.InvoiceData`) for POST /wallet/decodergbinvoice."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     recipient_id: str
-    # asset_iface: str | None = None
-    asset_id: str | None = None
-    amount: str | int | None = None
-    network: str
-    expiration_timestamp: int
-    transport_endpoints: list[str]
+    asset_schema: Optional[AssetSchema] = None
+    asset_id: Optional[str] = None
+    assignment: Any
+    assignment_name: Optional[str] = None
+    network: BitcoinNetwork
+    expiration_timestamp: Optional[int] = None
+    transport_endpoints: list[str] = Field(default_factory=list)
 
 
 class GetAssetResponseModel(BaseModel):
@@ -408,16 +453,6 @@ class GetAssetResponseModel(BaseModel):
 class IssueAssetResponseModel(AssetModel):
     """Response model for issuing assets."""
 
-
-class ListTransferAssetResponseModel(BaseModel):
-    """Response model for listing asset transfers."""
-
-    transfers: list[TransferAsset | None] | None = []
-
-
-class ListTransferAssetWithBalanceResponseModel(ListTransferAssetResponseModel):
-    """Response model for listing asset transfers with asset balance"""
-    asset_balance: AssetBalanceResponseModel
 
 class RefreshTransferResponseModel(StatusModel):
     """Response model for refreshing asset transfers."""
@@ -460,6 +495,87 @@ class FailTransferResponseModel(BaseModel):
     """Response model for fail transfer"""
     transfers_changed: bool
 
+
+class WalletFailTransfersResponse(BaseModel):
+    """POST /wallet/failtransfers — whether any transfers were failed."""
+
+    failed: bool
+
+
+class RefreshedTransferItem(BaseModel):
+    """Single entry in `wallet.refresh` result (`rgb_lib.RefreshedTransfer`)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    updated_status: Optional[TransferStatus] = None
+    failure: Optional[Any] = None
+
+
+class RefreshWalletResponse(RootModel[dict[str, RefreshedTransferItem]]):
+    """`wallet.refresh` returns a map of transfer index (JSON object keys) to refresh outcomes."""
+
+
+class RefreshJobStatusResponse(BaseModel):
+    """Row from `refresh_jobs` (GET /wallet/refresh/status/{job_id})."""
+
+    id: int
+    job_id: str
+    xpub_van: str
+    xpub_col: str
+    master_fingerprint: str
+    trigger: str
+    recipient_id: Optional[str] = None
+    asset_id: Optional[str] = None
+    status: str
+    attempts: int = 0
+    max_retries: int = 10
+    created_at: Optional[int] = None
+    processed_at: Optional[int] = None
+    error_message: Optional[str] = None
+
+
+class RefreshWatcherStatusResponse(BaseModel):
+    """Row from `refresh_watchers` (GET /wallet/refresh/watcher/...)."""
+
+    id: int
+    xpub_van: str
+    xpub_col: str
+    master_fingerprint: str
+    recipient_id: str
+    asset_id: Optional[str] = None
+    status: str
+    refresh_count: int = 0
+    last_refresh: Optional[int] = None
+    created_at: Optional[int] = None
+    expires_at: Optional[int] = None
+
+
+class WalletSyncResponse(BaseModel):
+    """POST /wallet/sync"""
+
+    message: str
+
+
+class WalletRestoreResponse(BaseModel):
+    """POST /wallet/restore"""
+
+    message: str
+
+
+class SyncJobEnqueuedResponse(BaseModel):
+    """POST /wallet/sync-job"""
+
+    message: str
+    job_id: str
+
+
+class BackupCreatedResponse(BaseModel):
+    """POST /wallet/backup"""
+
+    message: str
+    download_url: str
+
+
 class TransferTransportEndpoint(BaseModel):
     endpoint: str
     transport_type: TransportType
@@ -489,22 +605,60 @@ class TransferTransportEndpoint(BaseModel):
 #     AssignmentReplaceRight,
 #     AssignmentAny
 # ]
-    
+
+
+class RgbBlockTime(BaseModel):
+    """Bitcoin confirmation metadata from rgb-lib (`BlockTime`)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    height: int
+    timestamp: int
+
+
+class RgbWalletTransaction(BaseModel):
+    """BTC / RGB-related transaction row from `wallet.list_transactions` (rgb-lib `Transaction`)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    transaction_type: TransactionType
+    txid: str
+    received: int
+    sent: int
+    fee: int
+    confirmation_time: Optional[RgbBlockTime] = None
+
+
 class Transfer(BaseModel):
-    """Model representing a transfer."""
+    """Model representing an RGB transfer (`wallet.list_transfers`)."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     idx: int
     batch_transfer_idx: int
     created_at: int
     updated_at: int
     status: TransferStatus
-    requested_assignment: Optional[Any]
-    assignments:List[Any]
+    requested_assignment: Optional[Any] = None
+    assignments: List[Any] = Field(default_factory=list)
     kind: TransferKind
-    txid: Optional[str]
-    recipient_id: Optional[str]
-    receive_utxo: Optional[Outpoint]
-    change_utxo: Optional[Outpoint]
-    expiration: Optional[int]
-    transport_endpoints: List[TransferTransportEndpoint]
-    invoice_string:Optional[str]
+    txid: Optional[str] = None
+    recipient_id: Optional[str] = None
+    receive_utxo: Optional[Outpoint] = None
+    change_utxo: Optional[Outpoint] = None
+    expiration_timestamp: Optional[int] = None
+    transport_endpoints: List[TransferTransportEndpoint] = Field(default_factory=list)
+    invoice_string: Optional[str] = None
+    consignment_path: Optional[str] = None
+
+
+class ListTransferAssetResponseModel(BaseModel):
+    """Response model for listing asset transfers."""
+
+    transfers: list[Transfer | None] | None = []
+
+
+class ListTransferAssetWithBalanceResponseModel(ListTransferAssetResponseModel):
+    """Response model for listing asset transfers with asset balance"""
+
+    asset_balance: AssetBalanceResponseModel
