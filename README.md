@@ -200,14 +200,6 @@ rgb-lib can **reuse derivation slots** for receive flows when `reuse_addresses` 
 2. **Deploy default** — set `REUSE_ADDRESSES=1` (or `true` / `yes` / `on`) so new wallets get reuse unless the register body overrides it.
 3. **Persisted** — once set, the value is stored under the wallet’s data directory (`wallet.json`); later registrations can omit the body to keep the saved preference.
 
-**Quick check** — with the API running locally:
-
-```bash
-python scripts/run_rgb_node_flows.py reuse_address
-```
-
-This flow registers with `reuse_addresses: true`, syncs/refreshes, calls `/wallet/address` twice (they should match), rotates vanilla and colored addresses, then calls `/wallet/address` twice again (still matching when reuse stays on). Use `--verbose` for per-request JSON on stderr.
-
 
 ### UTXO management
 
