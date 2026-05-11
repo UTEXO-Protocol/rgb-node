@@ -161,7 +161,7 @@ def create_utxos_with_sign(
 @router.post("/wallet/listassets",response_model=GetAssetResponseModel)
 def list_assets(wallet_dep: tuple[Wallet, object,str,str]=Depends(get_wallet)):
     wallet, online,xpub_van, xpub_col = wallet_dep
-    assets = wallet.list_assets([AssetSchema.NIA,AssetSchema.IFA])
+    assets = wallet.list_assets([AssetSchema.NIA])
     return assets
 
 @router.post("/wallet/btcbalance",response_model=BtcBalance)
