@@ -31,7 +31,7 @@ if INDEXER_URL is None:
 _REUSE_ADDRESSES_RAW = os.getenv("REUSE_ADDRESSES", "").strip().lower()
 REUSE_ADDRESSES = _REUSE_ADDRESSES_RAW in ("1", "true", "yes", "on")
 
-SCHEMAS_FULL = [AssetSchema.NIA, AssetSchema.CFA, AssetSchema.UDA, AssetSchema.IFA]
+SCHEMAS_FULL = [AssetSchema.NIA, AssetSchema.CFA, AssetSchema.UDA]
 SCHEMAS_OFFLINE = [AssetSchema.NIA, AssetSchema.CFA, AssetSchema.UDA]
 
 
